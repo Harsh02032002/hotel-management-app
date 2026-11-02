@@ -1,0 +1,169 @@
+name: Build Customer Booking App APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: "Production Vercel Backend URL"
+        required: false
+        default: "https://hotel-management-backend-beta.vercel.app"
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  EXPO_PUBLIC_BACKEND_URL: ${{ github.event.inputs.backend_url || vars.EXPO_PUBLIC_BACKEND_URL || 'https://hotel-management-backend-beta.vercel.app' }}
+  EXPO_NO_TELEMETRY: "1"
+  CI: "1"
+
+jobs:
+  build-customer-apk:
+    name: Build Grand Palace Customer Booking APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Set up Android SDK & Accept Licenses
+        run: |
+          SDK_DIR="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> $GITHUB_ENV
+          yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Configure Production Environment (.env)
+        working-directory: customer-app
+        run: |
+          cat <<EOF > .env
+          EXPO_PUBLIC_BACKEND_URL=${EXPO_PUBLIC_BACKEND_URL}
+          EXPO_USE_FAST_RESOLVER="1"
+          EOF
+          cat .env
+
+      - name: Install dependencies
+        working-directory: customer-app
+        run: |
+          yarn install --network-timeout 600000
+
+      - name: Run Expo Prebuild (Generate Native Android Project)
+        working-directory: customer-app
+        run: |
+          npx expo prebuild --platform android --no-install
+
+      - name: Configure Gradle & Release Signing
+        working-directory: customer-app/android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cat <<EOF >> gradle.properties
+
+          org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.daemon=false
+          EOF
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > app/release.keystore
+            KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            cat <<EOF >> app/build.gradle
+
+          android {
+              signingConfigs {
+                  customRelease {
+                      storeFile file('release.keystore')
+                      storePassword "${ANDROID_KEYSTORE_PASSWORD}"
+                      keyAlias "${ANDROID_KEY_ALIAS}"
+                      keyPassword "${KEY_PASS}"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.customRelease
+                  }
+              }
+          }
+          EOF
+          else
+            keytool -genkeypair -v \
+              -keystore app/release.keystore \
+              -alias grandpalace_customer \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass grandpalace2026 \
+              -keypass grandpalace2026 \
+              -dname "CN=The Grand Palace Hotel, OU=Hospitality, O=GrandPalace, L=Jaipur, S=RJ, C=IN"
+            cat <<EOF >> app/build.gradle
+
+          android {
+              signingConfigs {
+                  customRelease {
+                      storeFile file('release.keystore')
+                      storePassword "grandpalace2026"
+                      keyAlias "grandpalace_customer"
+                      keyPassword "grandpalace2026"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.customRelease
+                  }
+              }
+          }
+          EOF
+          fi
+
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Signed Release APK (GrandPalace-Customer-Booking.apk)
+        working-directory: customer-app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/dist/GrandPalace-Customer-Booking.apk"
+          ls -lh "$GITHUB_WORKSPACE/dist/GrandPalace-Customer-Booking.apk"
+
+      - name: Upload Customer Booking APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GrandPalace-Customer-Booking-APK
+          path: dist/GrandPalace-Customer-Booking.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish Customer APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-apks
+          name: "The Grand Palace Hotel — Android APKs (Customer & Admin)"
+          body: |
+            ### The Grand Palace Hotel — Official Android APKs
+            - **Shared Production Backend:** `${{ env.EXPO_PUBLIC_BACKEND_URL }}`
+            - **App 1 (Customer Booking App):** `GrandPalace-Customer-Booking.apk` (`com.grandpalace.hotel.customer`)
+            - **App 2 (Hotel Admin App):** `GrandPalace-Hotel-Admin.apk` (`com.grandpalace.hotel.admin`)
+          files: |
+            dist/GrandPalace-Customer-Booking.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

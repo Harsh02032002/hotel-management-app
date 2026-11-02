@@ -1,0 +1,27 @@
+# Node & Expo
+node_modules/
+.expo/
+dist/
+web-build/
+android/
+ios/
+*.jks
+*.keystore
+*.apk
+*.aab
+
+# Python & Vercel
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vercel/
+backend/.env
+.env.local
+.env.check
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
