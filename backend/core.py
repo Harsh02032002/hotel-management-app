@@ -10,15 +10,35 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import asyncio
 import bcrypt
+import dns.resolver
 import jwt
 import os
 import logging
 
+# Configure public DNS (Google + Cloudflare) to prevent SRV ECONNREFUSED on local/cloud networks
+try:
+    _dns_resolver = dns.resolver.Resolver(configure=False)
+    _dns_resolver.nameservers = ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"]
+    _dns_resolver.timeout = 5.0
+    _dns_resolver.lifetime = 10.0
+    dns.resolver.default_resolver = _dns_resolver
+except Exception:
+    pass
+
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-mongo_url = os.environ.get("MONGO_URL", "").strip().strip('"').strip()
-db_name = os.environ.get("DB_NAME", "hotel_management").strip().strip('"').strip()
+DEFAULT_HOTEL_SRV = "mongodb+srv://Harsh:Harsh%402925@cluster0.hddqr9e.mongodb.net/restaurent?retryWrites=true&w=majority&appName=Cluster0"
+DIRECT_HOTEL_FALLBACK = (
+    "mongodb://Harsh:Harsh%402925@"
+    "ac-dxh54g9-shard-00-00.hddqr9e.mongodb.net:27017,"
+    "ac-dxh54g9-shard-00-01.hddqr9e.mongodb.net:27017,"
+    "ac-dxh54g9-shard-00-02.hddqr9e.mongodb.net:27017/restaurent"
+    "?ssl=true&replicaSet=atlas-131fot-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0"
+)
+
+mongo_url = (os.environ.get("MONGO_URI") or os.environ.get("MONGO_URL") or DEFAULT_HOTEL_SRV).strip().strip('"').strip()
+db_name = os.environ.get("DB_NAME", "restaurent").strip().strip('"').strip()
 
 _clients: dict[int, AsyncIOMotorClient] = {}
 
@@ -30,7 +50,10 @@ def get_client() -> AsyncIOMotorClient:
         loop_id = 0
     c = _clients.get(loop_id)
     if c is None:
-        c = AsyncIOMotorClient(mongo_url)
+        try:
+            c = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=10000)
+        except Exception:
+            c = AsyncIOMotorClient(DIRECT_HOTEL_FALLBACK, serverSelectionTimeoutMS=10000)
         _clients[loop_id] = c
     return c
 
@@ -95,10 +118,10 @@ class _NamespacedCollection:
 
 class _LoopAwareDB:
     def __getattr__(self, name: str):
-        return _NamespacedCollection(get_client()["hotel"]["zz_lite_test"], name)
+        return _NamespacedCollection(get_client()[db_name]["users"], name)
 
     def __getitem__(self, name: str):
-        return _NamespacedCollection(get_client()["hotel"]["zz_lite_test"], name)
+        return _NamespacedCollection(get_client()[db_name]["users"], name)
 
 
 client = _LoopAwareClient()
